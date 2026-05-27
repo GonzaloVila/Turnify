@@ -1,0 +1,143 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Rol {
+  SUPER_ADMIN
+  ADMIN
+  PROFESIONAL
+}
+
+enum EstadoTurno {
+  PENDIENTE
+  CONFIRMADO
+  CANCELADO
+  COMPLETADO
+  AUSENTE
+}
+
+enum OrigenTurno {
+  MANUAL
+  WEB
+}
+
+model Negocio {
+  id          String   @id @default(uuid())
+  nombre      String
+  email       String   @unique
+  telefono    String?
+  slug        String   @unique
+  descripcion String?
+  direccion   String?
+  logo_url    String?
+  activo      Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  usuarios     Usuario[]
+  profesionales Profesional[]
+  servicios    Servicio[]
+  clientes     Cliente[]
+  turnos       Turno[]
+}
+
+model Usuario {
+  id            String    @id @default(uuid())
+  negocio_id    String
+  nombre        String
+  email         String    @unique
+  password_hash String
+  rol           Rol       @default(ADMIN)
+  activo        Boolean   @default(true)
+  ultimo_login  DateTime?
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @updatedAt
+
+  negocio     Negocio      @relation(fields: [negocio_id], references: [id], onDelete: Cascade)
+  profesional Profesional?
+}
+
+model Profesional {
+  id          String  @id @default(uuid())
+  negocio_id  String
+  usuario_id  String? @unique
+  nombre      String
+  especialidad String?
+  telefono    String?
+  avatar_url  String?
+  activo      Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  negocio  Negocio            @relation(fields: [negocio_id], references: [id], onDelete: Cascade)
+  usuario  Usuario?           @relation(fields: [usuario_id], references: [id])
+  horarios HorarioDisponible[]
+  turnos   Turno[]
+}
+
+model Servicio {
+  id           String   @id @default(uuid())
+  negocio_id   String
+  nombre       String
+  descripcion  String?
+  duracion_min Int
+  precio       Decimal? @db.Decimal(10, 2)
+  color        String?
+  activo       Boolean  @default(true)
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  negocio Negocio @relation(fields: [negocio_id], references: [id], onDelete: Cascade)
+  turnos  Turno[]
+}
+
+model HorarioDisponible {
+  id             String  @id @default(uuid())
+  profesional_id String
+  dia_semana     Int
+  hora_inicio    String
+  hora_fin       String
+  activo         Boolean @default(true)
+
+  profesional Profesional @relation(fields: [profesional_id], references: [id], onDelete: Cascade)
+}
+
+model Cliente {
+  id         String   @id @default(uuid())
+  negocio_id String
+  nombre     String
+  email      String?
+  telefono   String?
+  notas      String?
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  negocio Negocio @relation(fields: [negocio_id], references: [id], onDelete: Cascade)
+  turnos  Turno[]
+}
+
+model Turno {
+  id                  String      @id @default(uuid())
+  negocio_id          String
+  profesional_id      String
+  servicio_id         String
+  cliente_id          String
+  fecha_hora_inicio   DateTime
+  fecha_hora_fin      DateTime
+  estado              EstadoTurno @default(PENDIENTE)
+  notas               String?
+  origen              OrigenTurno @default(MANUAL)
+  notificacion_enviada Boolean    @default(false)
+  created_at          DateTime    @default(now())
+  updated_at          DateTime    @updatedAt
+
+  negocio     Negocio     @relation(fields: [negocio_id], references: [id], onDelete: Cascade)
+  profesional Profesional @relation(fields: [profesional_id], references: [id])
+  servicio    Servicio    @relation(fields: [servicio_id], references: [id])
+  cliente     Cliente     @relation(fields: [cliente_id], references: [id])
+}
