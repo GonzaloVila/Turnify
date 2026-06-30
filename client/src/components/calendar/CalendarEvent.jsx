@@ -1,8 +1,10 @@
 export default function CalendarEvent({ event }) {
+  const profFirst = event.resource?.profesional?.nombre?.split(' ')[0] || '';
+
   return (
-    <div className="calendar-event" title={`${event.title} — ${event.resource?.cliente?.nombre}`}>
-      <span className="event-title">{event.title}</span>
-      <span className="event-cliente">{event.resource?.cliente?.nombre}</span>
+    <div className="calendar-event">
+      <span className="event-client">{event.resource?.cliente?.nombre}</span>
+      <span className="event-meta">{event.title} · {profFirst}</span>
     </div>
   );
 }

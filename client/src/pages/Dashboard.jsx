@@ -59,18 +59,6 @@ export default function Dashboard() {
 
   const firstName = user?.nombre?.split(' ')[0] ?? '';
 
-  const reservaUrl = negocio?.slug
-    ? `${window.location.origin}/reservar/${negocio.slug}`
-    : null;
-
-  const copiarLink = () => {
-    if (!reservaUrl) return;
-    navigator.clipboard.writeText(reservaUrl).then(() => {
-      setCopiado(true);
-      setTimeout(() => setCopiado(false), 2000);
-    });
-  };
-
   return (
     <div className="page">
       <div className="dash-header">
@@ -133,18 +121,6 @@ export default function Dashboard() {
               <div className="dash-stat-l">Clientes</div>
             </div>
           </div>
-
-          {reservaUrl && (
-            <div className="dash-reserva-link">
-              <div className="dash-reserva-label">Link de reserva pública</div>
-              <div className="dash-reserva-row">
-                <span className="dash-reserva-url">{reservaUrl}</span>
-                <button className="btn btn-secondary btn-sm" onClick={copiarLink}>
-                  {copiado ? '✓ Copiado' : 'Copiar'}
-                </button>
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="dash-timeline">

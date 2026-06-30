@@ -1,54 +1,145 @@
 const prisma = require('../config/db');
-const { getClient, MODEL } = require('../config/llm');
-const { tools, dispatchTool } = require('./chat-tools.service');
+const { getProvider, getGeminiModel, getGroqClient, GROQ_MODEL } = require('../config/llm');
+const { tools, geminiTools, dispatchTool } = require('./chat-tools.service');
+
+const GROQ_CHAT_TOOLS = tools.filter((t) =>
+  ['check_availability', 'book_appointment'].includes(t.function.name)
+);
+
+const GEMINI_CHAT_TOOLS = [{
+  functionDeclarations: geminiTools[0].functionDeclarations.filter((d) =>
+    ['check_availability', 'book_appointment'].includes(d.name)
+  ),
+}];
 
 async function buildSystemPrompt(negocio) {
   const today = new Date().toLocaleDateString('es-AR', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   });
 
+  const [servicios, profesionales] = await Promise.all([
+    prisma.servicio.findMany({
+      where: { negocio_id: negocio.id, activo: true },
+      select: { id: true, nombre: true, duracion_min: true, precio: true },
+    }),
+    prisma.profesional.findMany({
+      where: { negocio_id: negocio.id, activo: true },
+      select: { id: true, nombre: true, especialidad: true },
+    }),
+  ]);
+
+  const srvList = servicios
+    .map((s) => `  - "${s.nombre}" | ID: ${s.id} | ${s.duracion_min} min | $${Number(s.precio || 0).toLocaleString()}`)
+    .join('\n');
+
+  const profList = profesionales
+    .map((p) => `  - "${p.nombre}" | ID: ${p.id} | ${p.especialidad || 'General'}`)
+    .join('\n');
+
   return `Sos el asistente de reservas de ${negocio.nombre}. Hoy es ${today}.
 
-Al saludar, presentate brevemente y llamá list_services de inmediato sin pedir más input.
+Ya tenés los datos del negocio cargados. NO necesitás llamar ninguna tool para obtener servicios ni profesionales.
 
-FLUJO — un estado por mensaje, avanzá según lo que aún te falta recolectar:
+SERVICIOS DISPONIBLES:
+${srvList}
 
-ESTADO 1 — Falta servicio:
-  Llamá list_services → mostrá nombres numerados → preguntá cuál quiere.
+PROFESIONALES DISPONIBLES:
+${profList}
 
-ESTADO 2 — Falta profesional:
-  Llamá list_professionals → mostrá nombres numerados → preguntá cuál prefiere.
+SALUDO INICIAL:
+Respondé SOLO: "Hola, soy el asistente de ${negocio.nombre}. ¿En qué puedo ayudarte?"
+NO llames ninguna tool. Esperá a que el cliente hable.
 
-ESTADO 3 — Falta fecha:
-  Solo texto: "¿Para qué día querés el turno?" — NO llamés ninguna tool. Esperá la fecha.
+FLUJO — avanzá siempre al paso siguiente, nunca preguntes si quiere reservar ni si quiere saber más:
+1. Si el cliente nombra un servicio → confirmá el servicio con precio y duración, y EN EL MISMO MENSAJE preguntá con cuál profesional quiere atenderse mostrando las opciones.
+2. Si NO nombró servicio → preguntá qué servicio busca.
+3. Cuando elija profesional → preguntá para qué día. NO llames tools.
+4. Cuando diga el día → llamá check_availability y mostrá los horarios disponibles.
+5. Cuando elija horario → pedí nombre y teléfono.
+6. Cuando tenga todo → resumí y preguntá si confirma.
+7. Cuando confirme → llamá book_appointment y respondé: "¡Listo! Tu turno quedó reservado: [servicio] con [profesional] el [fecha] a las [hora]. ¡Te esperamos!"
 
-ESTADO 4 — Falta horario (ya tenés fecha del cliente):
-  Llamá check_availability con los IDs exactos y la fecha → mostrá horarios → preguntá cuál elige.
-
-ESTADO 5 — Falta nombre y teléfono:
-  Solo texto: pedí nombre completo y teléfono — NO llamés ninguna tool.
-
-ESTADO 6 — Tenés todo:
-  Solo texto: "¿Reservamos [servicio] con [profesional] el [fecha] a las [hora] para [nombre]?"
-
-ESTADO 7 — Cliente confirmó:
-  Llamá book_appointment → respondé EXACTAMENTE y SOLO: "¡Listo! Tu turno quedó reservado: [servicio] con [profesional] el [fecha] a las [hora]. ¡Te esperamos!"
+Si pregunta qué servicios hay → mostrá la lista completa y preguntá cuál quiere.
 
 REGLAS:
-- Nunca avancés al ESTADO 4 sin haber recibido la fecha del cliente en este mismo chat.
-- Los IDs son los que devuelve la tool. Usálos exactamente como vinieron, sin modificarlos.
-- Si el cliente indica la hora solo con el número (ej: "14"), interpretalo como "14:00".
-- Convertí la fecha del cliente a YYYY-MM-DD antes de llamar check_availability.
-- Nunca menciones IDs, códigos ni UUIDs al cliente.
-- Español argentino. Máximo 2 líneas por respuesta. Una sola pregunta por turno.`;
+- Usá los IDs EXACTOS de las listas de arriba cuando llames check_availability o book_appointment.
+- Ignorá tildes y mayúsculas al comparar (ej: "martin" = "Martin Lopez", "corte" = "Corte de cabello").
+- Si la hora es solo un número (ej: "14"), interpretalo como "14:00".
+- Convertí la fecha del cliente a YYYY-MM-DD.
+- NUNCA menciones IDs, UUIDs ni códigos al cliente.
+- Español argentino, tono amigable.
+- Máximo 2-3 líneas por respuesta. Una sola pregunta por turno.`;
 }
+
+// ── Gemini implementation ──
+
+async function* streamChatGemini(negocio, messages) {
+  const systemPrompt = await buildSystemPrompt(negocio);
+  const model = getGeminiModel();
+
+  const chat = model.startChat({
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    tools: GEMINI_CHAT_TOOLS,
+    history: messages.slice(0, -1).map(geminiMsg),
+  });
+
+  const lastMsg = messages[messages.length - 1];
+  let response = await chat.sendMessage(lastMsg.content);
+
+  while (true) {
+    const candidate = response.response.candidates?.[0];
+    if (!candidate) break;
+
+    const parts = candidate.content?.parts || [];
+    let hasToolCalls = false;
+    const toolResults = [];
+
+    for (const part of parts) {
+      if (part.text) {
+        yield { type: 'text-delta', delta: part.text };
+      }
+
+      if (part.functionCall) {
+        hasToolCalls = true;
+        const name = part.functionCall.name;
+        const args = part.functionCall.args || {};
+
+        yield { type: 'tool-call', name, input: args };
+
+        let result;
+        try {
+          result = await dispatchTool(name, args, negocio.id);
+        } catch (err) {
+          result = { error: err.message };
+        }
+
+        yield { type: 'tool-result', name, result };
+
+        toolResults.push({
+          functionResponse: { name, response: result },
+        });
+      }
+    }
+
+    if (!hasToolCalls) break;
+
+    response = await chat.sendMessage(toolResults);
+  }
+
+  yield { type: 'done' };
+}
+
+function geminiMsg(m) {
+  return {
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  };
+}
+
+// ── Groq implementation ──
 
 function sanitizeToolCalls(rawCalls) {
   return rawCalls.map((tc) => {
-    // Strip model artifacts from tool name:
-    //   "name<|token|>text"  → split on <|
-    //   "name={"args"}"      → split on =
-    //   "name {"args"}"      → split on first space, recover embedded args
     let raw = tc.function.name.split('<|')[0].split('=')[0];
     let recoveredArgs = null;
     const spaceIdx = raw.indexOf(' ');
@@ -65,9 +156,9 @@ function sanitizeToolCalls(rawCalls) {
   });
 }
 
-async function* streamChat(negocio, messages) {
+async function* streamChatGroq(negocio, messages) {
   const systemPrompt = await buildSystemPrompt(negocio);
-  const client = getClient();
+  const client = getGroqClient();
 
   const allMessages = [
     { role: 'system', content: systemPrompt },
@@ -75,9 +166,9 @@ async function* streamChat(negocio, messages) {
   ];
 
   const baseParams = {
-    model: MODEL,
+    model: GROQ_MODEL,
     messages: allMessages,
-    tools,
+    tools: GROQ_CHAT_TOOLS,
     tool_choice: 'auto',
     max_tokens: 1024,
   };
@@ -87,7 +178,6 @@ async function* streamChat(negocio, messages) {
     let finishReason = null;
     let toolCalls = null;
 
-    // Attempt streaming — best UX for text responses
     try {
       const toolCallsMap = {};
       const stream = await client.chat.completions.create({ ...baseParams, stream: true });
@@ -118,7 +208,6 @@ async function* streamChat(negocio, messages) {
         toolCalls = sanitizeToolCalls(Object.values(toolCallsMap));
       }
     } catch (err) {
-      // Groq rejects malformed tool names mid-stream — retry without streaming to recover
       if (!err.message?.toLowerCase().includes('tool call validation')) throw err;
 
       accumulatedContent = '';
@@ -168,6 +257,17 @@ async function* streamChat(negocio, messages) {
   }
 
   yield { type: 'done' };
+}
+
+// ── Router ──
+
+async function* streamChat(negocio, messages) {
+  const provider = getProvider();
+  if (provider === 'gemini') {
+    yield* streamChatGemini(negocio, messages);
+  } else {
+    yield* streamChatGroq(negocio, messages);
+  }
 }
 
 async function resolveNegocio(slug) {

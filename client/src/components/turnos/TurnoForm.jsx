@@ -22,11 +22,17 @@ export default function TurnoForm({ onSuccess, fechaInicial }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    await crearTurno.mutateAsync({
-      ...form,
-      fecha_hora_inicio: new Date(form.fecha_hora_inicio).toISOString(),
-    });
-    onSuccess?.();
+    try {
+      await crearTurno.mutateAsync({
+        ...form,
+        fecha_hora_inicio: new Date(form.fecha_hora_inicio).toISOString(),
+        cliente_id: form.cliente_id || undefined,
+        notas: form.notas || undefined,
+      });
+      onSuccess?.();
+    } catch {
+      // el error se muestra via crearTurno.error
+    }
   };
 
   return (
@@ -77,7 +83,12 @@ export default function TurnoForm({ onSuccess, fechaInicial }) {
       </div>
 
       {crearTurno.error && (
-        <p className="form-error">{crearTurno.error.response?.data?.message || 'Error al crear turno'}</p>
+        <div className="form-error">
+          <p>{crearTurno.error.response?.data?.message || 'Error al crear turno'}</p>
+          {crearTurno.error.response?.data?.data?.fields?.map((f) => (
+            <p key={f.field} style={{ fontSize: '0.8rem', marginTop: '0.2rem' }}>• {f.field}: {f.message}</p>
+          ))}
+        </div>
       )}
 
       <button type="submit" className="btn btn-primary" disabled={crearTurno.isPending}>
